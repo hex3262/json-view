@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Jsonviewer</title>
+  <link rel="stylesheet" href="jsonview/jsonview.scss" />
+</head>
+<body>
+  <div class="waitmessage">Please wait while the data are loaded and rendered.</div>
+  <div class="root"></div>
+  <script type="text/javascript">
+    async function main(json) {
+      const jsonview = await import('./jsonview/jsonview.js');
+      fetch(json)
+      .then((res)=> {
+        return res.text();
+      })
+      .then((data) => {
+        const tree = jsonview.create(data);
+        if (tree.key == 'object')
+          tree.key = json.substr(0, json.lastIndexOf('.'));
+        jsonview.render(tree, document.querySelector('.root'));
+        document.querySelector('.waitmessage').remove();
+        /* jsonview.expand(tree); */
+      })
+      .catch((err) => {
+        console.log(err);
+      })
+    }
+    const params = new Proxy(new URLSearchParams(window.location.search), {
+      get: (searchParams, prop) => searchParams.get(prop),
+    });
+    main(params.json);
+  </script>
+</body>
+</html>

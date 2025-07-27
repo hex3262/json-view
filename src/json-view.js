@@ -1,7 +1,39 @@
-import './jsonview.scss';
+/*
+MIT License
 
-import getDataType from './utils/getDataType';
-import { listen, detach, element } from './utils/dom';
+Copyright (c) 2020 Pavel Grabovets
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+Original repo: https://github.com/pgrabovets/json-view
+
+Extended in April 2025 by Carsten Emde to handle "$ref" references for the OSSelot
+project (www.osselot.org) by Open Source Automation Development Lab (OSADL) eG.
+
+1. Start all nodes collapsed.
+2. Render a node only when expanded by user interaction.
+3. When a node is expanded that is referenced by "$ref", resolve it for the current
+   node and expand it then.
+*/
+
+import getDataType from './utils/getDataType.js';
+import { listen, detach, element } from './utils/dom.js';
 
 const classes = {
     HIDDEN: 'hidden',
@@ -76,25 +108,71 @@ function setCaretIconRight(node) {
   }
 }
 
-export function toggleNode(node) {
+export function toggleNode(caretEl, node) {
+  var oldCaretCursor = caretEl.style.cursor;
+  caretEl.style.cursor = "wait";
   if (node.isExpanded) {
     node.isExpanded = false;
     setCaretIconRight(node);
-    hideNodeChildren(node);
+    setTimeout(function() {
+      hideNodeChildren(node);
+      caretEl.style.cursor = oldCaretCursor;
+    }, 10);
   } else {
     node.isExpanded = true;
     setCaretIconDown(node);
-    showNodeChildren(node);
+    setTimeout(function() {
+      if (typeof node.children !== 'undefined' && node.children[0].isPending) {
+        const containerEl = createContainerElement();
+        if (node.children[0].key == "$ref") {
+          node = extendNodeElementByRef(node, caretEl.parentElement);
+        }
+        traverse(node, function(node) {
+          node.el = createNodeElement(node);
+          if (node.key != "$ref")
+            containerEl.appendChild(node.el);
+          node.isPending = false;
+        });
+        caretEl.parentElement.replaceWith(containerEl);
+        expand(node);
+      }
+      showNodeChildren(node);
+      caretEl.style.cursor = oldCaretCursor;
+    }, 10);
   }
 }
 
 /**
+ * Resolve reference
+ * @param {object} node
+ * @return dereferenced JSON node
+ */
+function resolveref(node) {
+  var parts = node.children[0].value.replace(/\//g, "|").replace(/~1/g, "/").split("|")
+  return node.parsedData[parts[1]][parts[2]];
+}
+
+/**
+ * Create node html element by reference
+ * @param {object} node
+ * @param {target} parent html element
+ * @return html element
+ */
+function extendNodeElementByRef(node, target) {
+  var parsedData = resolveref(node);
+  createSubnode(parsedData, node, false);
+  node.children.splice(0, 1);
+  return node;
+}
+
+/**
  * Create node html element
- * @param {object} node 
+ * @param {object} node
  * @return html element
  */
 function createNodeElement(node) {
   let el = element('div');
+  let isRef = false;
 
   const getSizeString = (node) => {
     const len = node.children.length;
@@ -109,7 +187,7 @@ function createNodeElement(node) {
       size: getSizeString(node),
     })
     const caretEl = el.querySelector('.' + classes.CARET_ICON);
-    node.dispose = listen(caretEl, 'click', () => toggleNode(node));
+    node.dispose = listen(caretEl, 'click', () => toggleNode(caretEl, node));
   } else {
     el.innerHTML = notExpandedTemplate({
       key: node.key,
@@ -171,7 +249,9 @@ function createNode(opt = {}) {
     children: opt.children || [],
     el: opt.el || null,
     depth: opt.depth || 0,
-    dispose: null
+    dispose: null,
+    isPending: opt.isPending,
+    parsedData: opt.parsedData
   }
 }
 
@@ -180,8 +260,13 @@ function createNode(opt = {}) {
  * @param {object} Json data
  * @param {object} node
  */
-function createSubnode(data, node) {
+function createSubnode(data, node, late) {
   if (typeof data === 'object') {
+    var pending;
+    if (node.depth > 1 && !late)
+        pending = true;
+    else
+        pending = false;
     for (let key in data) {
       const child = createNode({
         value: data[key],
@@ -189,9 +274,11 @@ function createSubnode(data, node) {
         depth: node.depth + 1,
         type: getDataType(data[key]),
         parent: node,
+        isPending: pending,
+        parsedData: node.parsedData
       });
       node.children.push(child);
-      createSubnode(data[key], child);
+      createSubnode(data[key], child, late);
     }
   }
 }
@@ -211,8 +298,10 @@ export function create(jsonData) {
     value: parsedData,
     key: getDataType(parsedData),
     type: getDataType(parsedData),
+    isPending: false,
   });
-  createSubnode(parsedData, rootNode);
+  rootNode.parsedData = parsedData;
+  createSubnode(parsedData, rootNode, false);
   return rootNode;
 }
 
@@ -230,6 +319,20 @@ export function renderJSON(jsonData, targetElement) {
 }
 
 /**
+ * Count number of elements in an object
+ * @param {object} obj
+ * @return {int} number
+ */
+function countElements(obj) {
+    var count = 0;
+    for (var prop in obj) {
+        if (obj.hasOwnProperty(prop))
+            ++count;
+    }
+    return count;
+}
+
+/**
  * Render tree into DOM container
  * @param {object} tree
  * @param {htmlElement} targetElement
@@ -238,8 +341,16 @@ export function render(tree, targetElement) {
   const containerEl = createContainerElement();
 
   traverse(tree, function(node) {
-    node.el = createNodeElement(node);
-    containerEl.appendChild(node.el);
+    if (!node.isPending) {
+      node.el = createNodeElement(node);
+      containerEl.appendChild(node.el);
+    } else {
+      if (node.key == "$ref") {
+        var parsedData = resolveref(node.parent);
+        var child = node.parent.el.children[2];
+        child.innerText = child.innerText.replace("1", countElements(parsedData));
+      }
+    }
   });
 
   targetElement.appendChild(containerEl);
